@@ -4,6 +4,8 @@ library(httr)
 library(xml2)
 
 BASE_URL <- 'https://www.metal-archives.com'
+FULL_DATA <- list()
+SEARCH_CACHE <- list()
 
 echo <- function(string='', fill=T)
 {
@@ -13,12 +15,57 @@ echo.default <- function(string='', fill=T)
 {
     cat(string, fill=fill)
 }
+
+fill_data <- function(someObject)
+{
+    UseMethod('fill_data')
+}
+fill_data.default <- function(someObject)
+{
+    echo('fill_data called with unknown object: No Idea what to do.')
+}
+
 input <- function(string='')
 {
     echo(paste(string, ''), F) # the paste adds a space after string
     stdin <- file('stdin')
     on.exit(close(stdin))
     readLines(stdin, n=1)
+}
+
+Member <- function(name = NULL, url = NULL, born = NULL, age = NULL)
+{
+    member <- list(
+        name = name,
+        born = born,
+        url = url,
+        age = age
+    )
+    class(member) <- "Member"
+    member
+}
+echo.Member <- function(member)
+{
+    string <- trimws(member$name)
+    if( !is.null(member$age) )
+        string <- paste(string, member$age)
+    echo(string)
+}
+fill_data.Member <- function(member)
+{
+    response <- GET(member$url)
+    tree <- content(response, type="text/html", encoding='UTF-8')
+    elements <- xml_find_all(tree, "//div[@id='member_info']/*/dd")
+    lapply(elements, function(elem)
+    {
+        text <- trimws(xml_text(elem))
+        if( grepl("born", text, fixed=T) )
+        {
+            member$born <<- text
+            member$age <<- as.numeric(substr(text, 0, 2))
+        }
+    })
+    member
 }
 
 Band <- function(name = NULL, members = NULL, all_members = NULL)
@@ -33,22 +80,41 @@ Band <- function(name = NULL, members = NULL, all_members = NULL)
 }
 echo.Band <- function(band)
 {
-    echo(paste(band$name, 'currently has', length(band$members), 'members:'))
+    mean_age <- mean(sapply(band$members, function(m){if(!is.null(m$age))m$age}))
+    echo(paste(band$name, 'currently has', length(band$members), 'members.'))
+    echo(paste('  Mean age:', mean_age))
     for(member in band$members)
-        echo(paste0('   ',xml_text(member)))
+        echo(member)
     echo()
     echo(paste0('I also have a list of everyone who ever played with ', band$name, ':'))
     for(member in band$all_members)
-        echo(paste0('   ',xml_text(member)))
+        echo(member)
 }
 
 get_by_url <- function(url)
 {
+    if( !is.null(FULL_DATA[[url]]) )
+    {
+        return(FULL_DATA[[url]])
+    }
+    parse_member <- function(xml_element)
+    {
+        name <- xml_text(xml_element)
+        url <- xml_attr(xml_element, 'href')
+        member <- Member(name=name, url=url)
+        fill_data(member)
+    }
     response <- GET(url)
     tree <- content(response, type="text/html", encoding='UTF-8')
     members_current <- xml_find_all(tree, "//div[@id='band_tab_members_current']//tr[@class='lineupRow']/td/a")
     members_all <- xml_find_all(tree, "//div[@id='band_tab_members_all']//tr[@class='lineupRow']/td/a")
-    Band(members=members_current, all_members=members_all)
+    members <- list()
+    all_members <- list()
+    members <- lapply(members_current, parse_member)
+    all_members <- lapply(members_all, parse_member)
+    band <- Band(members=members, all_members=all_members)
+    FULL_DATA[[url]] <<- band
+    band
 }
 
 search_band_name <- function(search_term)
@@ -62,7 +128,13 @@ search_band_name <- function(search_term)
         c(band_link, band_name)
     }
     echo('Doing my best to find bands. Please wait a few seconds.')
-    response <- GET(paste(BASE_URL, '/search/ajax-band-search/?field=name&query=', search_term, '&iDisplayStart=0&iDisplayLength=20', sep=''))
+    if( !is.null(SEARCH_CACHE[[search_term]]) )
+        response <- SEARCH_CACHE[[search_term]]
+    else
+    {
+        response <- GET(paste(BASE_URL, '/search/ajax-band-search/?field=name&query=', search_term, '&iDisplayStart=0&iDisplayLength=20', sep=''))
+        response ->> SEARCH_CACHE[[search_term]]
+    }
     cont <- content(response)
     n <- cont$iTotalDisplayRecords
     if( n < 1 )
@@ -78,7 +150,7 @@ search_band_name <- function(search_term)
         echo()
         echo(band)
     }
-    else
+    if( n > 1 )
     {
         echo(paste('Found', n, 'Bands. Please choose one.'))
         for(index in seq_along(cont$aaData))
@@ -104,13 +176,22 @@ search_band_name <- function(search_term)
     }
 }
 
+if( file.exists('bands.rds') )
+    FULL_DATA <- readRDS('bands.rds')
+if( file.exists('searches.rds') )
+    SEARCH_CACHE <- readRDS('searches.rds')
+
 echo('If you want to quit the program enter "q" as search term.')
 while(T)
 {
     echo()
     search_term <- input('Search for a band:')
     if(search_term == 'q')
+    {
+        saveRDS(SEARCH_CACHE, "searches.rds")
+        saveRDS(FULL_DATA, "bands.rds")
         quit()
+    }
     echo()
     search_band_name(search_term)
 }
